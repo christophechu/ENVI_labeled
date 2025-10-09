@@ -248,10 +248,10 @@ class ENVI:
         sc_inp = sc_inp[:, : self.dist_size_dict[self.sc_dist] * self.sc_data.shape[-1]]
         if self.sc_dist == "zinb":
             sc_r, sc_p, sc_d = jnp.split(sc_inp, 3, axis=-1)
-            return nn.softplus(sc_r) * jnp.exp(-sc_p) * (1 - nn.sigmoid(sc_d))
+            return nn.softplus(sc_r) * jnp.exp(sc_p) * (1 - nn.sigmoid(sc_d))
         if self.sc_dist == "nb":
             sc_r, sc_p = jnp.split(sc_inp, 2, axis=-1)
-            return nn.softplus(sc_r) * jnp.exp(-sc_p)
+            return nn.softplus(sc_r) * jnp.exp(sc_p)
         if self.sc_dist == "pois":
             sc_l = sc_inp
             return sc_l
@@ -371,7 +371,7 @@ class ENVI:
         dec_cov = jax_prob.math.fill_triangular(dec_cov)
         return jnp.matmul(dec_cov, dec_cov.transpose([0, 2, 1]))
 
-    def create_train_state(self, key=random.key(0), init_lr=0.0001, decay_steps=4000):
+    def create_train_state(self, key=random.key(0), init_lr=3e-4, decay_steps=100):
         """
         :meta private:
         """
@@ -384,7 +384,7 @@ class ENVI:
             key=subkey2,
         )["params"]
 
-        lr_sched = optax.exponential_decay(init_lr, decay_steps, 0.5, staircase=True)
+        lr_sched = optax.exponential_decay(init_lr, decay_steps, 0.99, staircase=False)
         tx = optax.adam(lr_sched)  #
 
         return TrainState.create(
@@ -443,15 +443,15 @@ class ENVI:
 
     def train(
         self,
-        training_steps=16000,
+        training_steps=10000,
         batch_size=128,
         verbose=16,
-        init_lr=0.0001,
-        decay_steps=4000,
+        init_lr=3e-4,
+        decay_steps=100,
         key=random.key(0),
     ):
         """
-        Set up optimization parameters and train the ENVI moodel
+        Set up optimization parameters and train the ENVI model
 
 
         :param training_steps: (int) number of gradient descent steps to train ENVI (default 16000)
