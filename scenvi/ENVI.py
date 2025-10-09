@@ -248,10 +248,10 @@ class ENVI:
         sc_inp = sc_inp[:, : self.dist_size_dict[self.sc_dist] * self.sc_data.shape[-1]]
         if self.sc_dist == "zinb":
             sc_r, sc_p, sc_d = jnp.split(sc_inp, 3, axis=-1)
-            return nn.softplus(sc_r) * jnp.exp(sc_p) * (1 - nn.sigmoid(sc_d))
+            return nn.softplus(sc_r) * jnp.exp(-sc_p) * (1 - nn.sigmoid(sc_d))
         if self.sc_dist == "nb":
             sc_r, sc_p = jnp.split(sc_inp, 2, axis=-1)
-            return nn.softplus(sc_r) * jnp.exp(sc_p)
+            return nn.softplus(sc_r) * jnp.exp(-sc_p)
         if self.sc_dist == "pois":
             sc_l = sc_inp
             return sc_l
