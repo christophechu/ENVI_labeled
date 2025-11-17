@@ -13,6 +13,8 @@ from jax import random
 from sklearn.preprocessing import OneHotEncoder
 from tqdm import tqdm   
 import scipy.sparse
+from typing import Union
+from scipy.sparse import issparse
 
 class FeedForward(nn.Module):
     """
@@ -178,12 +180,15 @@ def batch_knn(data, batch, k):
     return kNNGraphIndex.astype("int")
 
 
-def calculate_covariance_matrices(spatial_data, kNN, exp_data, spatial_key="spatial", batch_key=-1, batch_size=None):
+def calculate_covariance_matrices(spatial_data, neighbor_mode, radius, kNN, niche_key, exp_data, spatial_key="spatial", batch_key: Union[str, int] = -1, batch_size=None):
     """
     Calculate covariance matrices for each cell/spot in spatial data using provided expression data
     
     :param spatial_data: AnnData object with spatial coordinates
-    :param kNN: Number of nearest neighbors
+    :param neighbor_mode: (str) 'knn' or 'radius' to define niche
+    :param radius: (float) radius to define niche
+    :param kNN: (int) number of nearest neighbours to define niche
+    :param niche_key: (str) obs key name of niche label to restrict neighbors to same niche (default None, i.e. no restriction)
     :param exp_data: Pre-processed expression data to use for covariance calculation
     :param spatial_key: Key for spatial coordinates in obsm
     :param batch_key: Key for batch information in obs, or -1 for no batch
@@ -192,22 +197,92 @@ def calculate_covariance_matrices(spatial_data, kNN, exp_data, spatial_key="spat
     :return: 3D array of covariance matrices
     """
     
-    # Get the KNN graph
-    if batch_key == -1:
-        kNNGraph = sklearn.neighbors.kneighbors_graph(
-            spatial_data.obsm[spatial_key],
-            n_neighbors=kNN,
-            mode="connectivity",
-            n_jobs=-1,
-        ).tocoo()
-        kNNGraphIndex = np.reshape(
-            np.asarray(kNNGraph.col), [spatial_data.obsm[spatial_key].shape[0], kNN]
-        )
+    coords = spatial_data.obsm[spatial_key]
+    n_cells = coords.shape[0]
+    neighbor_lists = [[] for _ in range(n_cells)]
+
+    # Build neighbor graph
+    if neighbor_mode == "knn":
+        if batch_key == -1:
+            kNNGraph = sklearn.neighbors.kneighbors_graph(
+                coords,
+                n_neighbors=kNN,
+                mode="connectivity",
+                n_jobs=-1,
+            ).tolil()
+            for i in range(n_cells):
+                neighbor_lists[i] = np.array(kNNGraph.rows[i], dtype=int)
+        else:
+            for batch_value in np.unique(spatial_data.obs[batch_key]):
+                batch_idx = np.where(spatial_data.obs[batch_key] == batch_value)[0]
+                sub_coords = coords[batch_idx]
+                knn_sub = sklearn.neighbors.kneighbors_graph(
+                    sub_coords, n_neighbors=kNN, mode="connectivity", n_jobs=-1
+                ).tolil()
+                for row_i, cell_i in enumerate(batch_idx):
+                    neighbor_lists[cell_i] = batch_idx[knn_sub.rows[row_i]]
+                    
+    elif neighbor_mode == "radius":
+        if batch_key == -1:
+            R_graph = sklearn.neighbors.radius_neighbors_graph(
+                coords,
+                radius=radius,
+                mode="connectivity",
+                include_self=False,
+                n_jobs=-1,
+            ).tolil()
+            for i in range(n_cells):
+                neighbor_lists[i] = np.array(R_graph.rows[i], dtype=int)
+        else:
+            for batch_value in np.unique(spatial_data.obs[batch_key]):
+                batch_idx = np.where(spatial_data.obs[batch_key] == batch_value)[0]
+                sub_coords = coords[batch_idx]
+                R_graph = sklearn.neighbors.radius_neighbors_graph(
+                    sub_coords,
+                    radius=radius,
+                    mode="connectivity",
+                    include_self=False,
+                    n_jobs=-1,
+                ).tolil()
+
+                for row_i, cell_i in enumerate(batch_idx):
+                    neighbor_lists[cell_i] = batch_idx[R_graph.rows[row_i]]
     else:
-        kNNGraphIndex = batch_knn(
-            spatial_data.obsm[spatial_key], spatial_data.obs[batch_key], kNN
-        )
+        raise ValueError("neighbor_mode must be either 'knn' or 'radius'.")
+
+    # Apply niche filtering if niche_key is provided
+    if niche_key is not None:
+        niche = np.asarray(spatial_data.obs[niche_key])
+        filtered = []
+        for i in range(n_cells):
+            neigh = np.array(neighbor_lists[i], dtype=int)
+            # keep only neighbors with same niche
+            same = neigh[niche[neigh] == niche[i]]
+            # fallback: if none exist, use original neighbors
+            if same.size == 0:
+                same = neigh
+            filtered.append(same)
+        neighbor_lists = filtered
     
+    # Ensure each cell has at least one neighbor
+    for i in range(n_cells):
+        if len(neighbor_lists[i]) == 0:
+            # fallback to nearest neighbor
+            d = np.linalg.norm(coords - coords[i], axis=1)
+            nearest = np.argsort(d)[1]  # skip self
+            neighbor_lists[i] = np.array([nearest], dtype=int)
+    
+    # Build kNN graph index with sampling if necessary
+    kNNGraphIndex = np.zeros((n_cells, kNN), dtype=int)
+    for i in range(n_cells):
+        neigh = neighbor_lists[i]
+        # if neighbors fewer than kNN: sample with replacement
+        if neigh.size >= kNN:
+            kNNGraphIndex[i] = neigh[:kNN]
+        else:
+            fill = np.random.choice(neigh, size=kNN, replace=True)
+            kNNGraphIndex[i] = fill
+            
     # Get the global mean for each feature
     global_mean = exp_data.mean(axis=0)
     
@@ -257,57 +332,122 @@ def calculate_covariance_matrices(spatial_data, kNN, exp_data, spatial_key="spat
     
     return CovMats
 
-def niche_cell_type(
-    spatial_data, kNN, spatial_key="spatial", cell_type_key="cell_type", batch_key=-1
-):
-    """
-    :meta private:
-    """
 
+def niche_cell_type(spatial_data, neighbor_mode, kNN, radius, spatial_key="spatial", cell_type_key="cell_type",batch_key: Union[str, int] = -1,):
+    """
+    Compute local cell-type abundance in the spatial neighborhood (kNN or radius).
     
+    Parameters
+    ----------
+    spatial_data : AnnData
+    neighbor_mode : "knn" or "radius"
+    kNN : number of neighbors for kNN mode
+    radius : radius for radius mode
+    spatial_key : obsm key for spatial coordinates
+    cell_type_key : obs key for cell types
+    batch_key : batch column or -1 for none
+    
+    Returns
+    -------
+    cell_type_niche : DataFrame, shape (n_cells, n_cell_types)
+        Each row = abundance of each cell type in the neighborhood.
+    """
 
-    if batch_key == -1:
-        kNNGraph = sklearn.neighbors.kneighbors_graph(
-            spatial_data.obsm[spatial_key],
-            n_neighbors=kNN,
-            mode="connectivity",
-            n_jobs=-1,
-        ).tocoo()
-        knn_index = np.reshape(
-            np.asarray(kNNGraph.col), [spatial_data.obsm[spatial_key].shape[0], kNN]
-        )
+    coords = spatial_data.obsm[spatial_key]
+    n_cells = coords.shape[0]
+    neighbor_lists = [[] for _ in range(n_cells)]
+
+    if neighbor_mode == "knn":
+        if batch_key == -1:
+            kNNGraph = sklearn.neighbors.kneighbors_graph(
+                coords,
+                n_neighbors=kNN,
+                mode="connectivity",
+                n_jobs=-1
+            ).tolil()
+            for i in range(n_cells):
+                neighbor_lists[i] = np.array(kNNGraph.rows[i], dtype=int)
+        else:
+            for batch_value in np.unique(spatial_data.obs[batch_key]):
+                batch_idx = np.where(spatial_data.obs[batch_key] == batch_value)[0]
+                sub_coords = coords[batch_idx]
+                knn_sub = sklearn.neighbors.kneighbors_graph(
+                    sub_coords, n_neighbors=kNN, mode="connectivity", n_jobs=-1
+                ).tolil()
+                for row_i, cell_i in enumerate(batch_idx):
+                    neighbor_lists[cell_i] = batch_idx[knn_sub.rows[row_i]]
+
+    elif neighbor_mode == "radius":
+        if radius is None:
+            raise ValueError("Radius must be provided when neighbor_mode='radius'")
+        if batch_key == -1:
+            R_graph = sklearn.neighbors.radius_neighbors_graph(
+                coords,
+                radius=radius,
+                mode="connectivity",
+                include_self=False,
+                n_jobs=-1,
+            ).tolil()
+            for i in range(n_cells):
+                neighbor_lists[i] = np.array(R_graph.rows[i], dtype=int)
+        else:
+            for batch_value in np.unique(spatial_data.obs[batch_key]):
+                batch_idx = np.where(spatial_data.obs[batch_key] == batch_value)[0]
+                sub_coords = coords[batch_idx]
+                R_graph = sklearn.neighbors.radius_neighbors_graph(
+                    sub_coords, radius=radius,
+                    mode="connectivity",
+                    include_self=False,
+                    n_jobs=-1
+                ).tolil()
+                for row_i, cell_i in enumerate(batch_idx):
+                    neighbor_lists[cell_i] = batch_idx[R_graph.rows[row_i]]
     else:
-        knn_index = batch_knn(
-            spatial_data.obsm[spatial_key], spatial_data.obs[batch_key], kNN
-        )
+        raise ValueError("neighbor_mode must be 'knn' or 'radius'")
+    
+    for i in range(n_cells):
+        if len(neighbor_lists[i]) == 0:
+            d = np.linalg.norm(coords - coords[i], axis=1)
+            nearest = np.argsort(d)[1] 
+            neighbor_lists[i] = np.array([nearest], dtype=int)
 
-    one_hot_enc = OneHotEncoder().fit(
-        np.asarray(list(set(spatial_data.obs[cell_type_key]))).reshape([-1, 1])
-    )
-    cell_type_one_hot = (
-        one_hot_enc.transform(
-            np.asarray(spatial_data.obs[cell_type_key]).reshape([-1, 1])
-        )
-        .reshape([spatial_data.obs["cell_type"].shape[0], -1])
-        .todense()
-    )
+    kNNGraphIndex = np.zeros((n_cells, kNN), dtype=int)
+    for i in range(n_cells):
+        neigh = neighbor_lists[i]
+        if neigh.size >= kNN:
+            kNNGraphIndex[i] = neigh[:kNN]
+        else:
+            kNNGraphIndex[i] = np.random.choice(neigh, size=kNN, replace=True)
 
-    cell_type_niche = pd.DataFrame(
-        cell_type_one_hot[knn_index].sum(axis=1),
-        index=spatial_data.obs_names,
-        columns=list(one_hot_enc.categories_[0]),
-    )
+    cell_types = np.asarray(spatial_data.obs[cell_type_key]).reshape(-1, 1)
+
+    one_hot_enc = OneHotEncoder(sparse=True)
+    cell_type_one_hot = one_hot_enc.fit_transform(cell_types)
+
+    neigh_ohe = cell_type_one_hot[kNNGraphIndex]  # (N, kNN, n_types)
+
+    neigh_sum = neigh_ohe.sum(axis=1)  # (N, n_types)
+
+    if issparse(neigh_sum):
+        neigh_sum = neigh_sum.A
+
+    colnames = list(one_hot_enc.categories_[0])
+    cell_type_niche = pd.DataFrame(neigh_sum, index=spatial_data.obs_names, columns=colnames)
+
     return cell_type_niche
 
+
 def compute_covet(
-    spatial_data, k=8, g=64, genes=None, spatial_key="spatial", batch_key="batch", 
+    spatial_data, neighbor_mode="knn", k=8, radius=30.0, g=64, genes=None, spatial_key="spatial", batch_key="batch", 
     batch_size=None, use_obsm=None, use_layer=None, niche_key=None
 ):
     """
     Compute niche covariance matrices for spatial data, run with scenvi.compute_covet
 
     :param spatial_data: (anndata) spatial data, with an obsm indicating spatial location of spot/segmented cell
+    :param neighbor_mode: (str) 'knn' or 'radius' to define niche (default 'knn')
     :param k: (int) number of nearest neighbours to define niche (default 8)
+    :param radius: (float) radius to define niche when neighbor_mode is 'radius' (default 30.0)
     :param g: (int) number of HVG to compute COVET representation on (default 64)
     :param genes: (list of str) list of genes to keep for niche covariance (default [])
     :param spatial_key: (str) obsm key name with physical location of spots/cells (default 'spatial')
@@ -361,8 +501,13 @@ def compute_covet(
                         # Data is already log-transformed
                         layer = None
                     else:
-                        # Create log layer
-                        spatial_data_copy.layers["log"] = np.log(spatial_data_copy.X + 1)
+                        X = spatial_data_copy.X
+                        if issparse(X):
+                            X_log = X.copy()
+                            X_log.data = np.log1p(X_log.data)
+                            spatial_data_copy.layers["log"] = X_log
+                        else:
+                            spatial_data_copy.layers["log"] = np.log1p(X)
                         layer = "log"
                 else:
                     layer = use_layer
@@ -408,7 +553,7 @@ def compute_covet(
     
     # Calculate covariance matrices with batch processing
     COVET = calculate_covariance_matrices(
-        spatial_data, k, exp_data, spatial_key=spatial_key, 
+        spatial_data, neighbor_mode, radius, k, niche_key, exp_data, spatial_key=spatial_key, 
         batch_key=batch_key, batch_size=batch_size
     )
     

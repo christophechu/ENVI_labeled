@@ -11,6 +11,7 @@ import tensorflow_probability.substrates.jax as jax_prob # type: ignore
 from flax import linen as nn
 from jax import jit, random
 from tqdm import trange, tqdm
+from scipy.sparse import issparse
 
 from scenvi._dists import (
     KL,
@@ -36,7 +37,9 @@ class ENVI:
     :param num_layers: (int) number of neural network for decoders and encoders (default 3)
     :param num_neurons: (int) number of neurons in each layer (default 1024)
     :param latent_dim: (int) size of ENVI latent dimention (size 512)
+    :param neighbor_mode: (str) method to define physical neighbours for niche (default knn, could be 'knn' or 'radius')
     :param k_nearest: (int) number of physical neighbours to describe niche (default 8)
+    :param radius: (float) radius to define physical neighbours when using radius mode (default 30.0)
     :param covet_batch_size: (int) batch size for COVET computation (default 256)
     :param num_cov_genes: (int) number of HVGs to compute niche covariance with (default ֿ64), if -1 uses all genes
     :param cov_genes: (list of str) manual genes to compute niche with (default None)
@@ -62,11 +65,14 @@ class ENVI:
         sc_data,
         spatial_key="spatial",
         batch_key="batch",
+        cell_type_key="cell_type",
         niche_key=None,
         num_layers=3,
         num_neurons=1024,
         latent_dim=512,
+        neighbor_mode='knn',
         k_nearest=8,
+        radius=30.0,
         covet_batch_size=256,
         num_cov_genes=64,
         cov_genes=None,
@@ -91,8 +97,11 @@ class ENVI:
         if batch_key not in spatial_data.obs.columns:
             batch_key = -1
         self.niche_key = niche_key
+        self.celltype_key = cell_type_key
 
+        self.neighbor_mode = neighbor_mode
         self.k_nearest = k_nearest
+        self.radius = radius
         self.spatial_key = spatial_key
         self.batch_key = batch_key
         self.cov_genes = cov_genes
@@ -116,7 +125,9 @@ class ENVI:
             self.CovGenes,
         ) = compute_covet(
             spatial_data=self.spatial_data,
+            neighbor_mode=self.neighbor_mode,
             k=self.k_nearest,
+            radius=self.radius,
             g=self.num_cov_genes,
             genes=self.cov_genes,
             spatial_key=self.spatial_key,
@@ -166,22 +177,20 @@ class ENVI:
         )
 
         print("Finished Initializing ENVI")
-
+        
     def inp_log_fn(self, x):
-        """
-        :meta private:
-        """
-
         if self.log_input > 0:
+            if issparse(x):
+                x = x.copy()
+                x_dense = x.toarray()
+                return jnp.log(x_dense + self.log_input)
             return jnp.log(x + self.log_input)
-        return x
+        if issparse(x):
+            return jnp.asarray(x.toarray())
+        return jnp.asarray(x)
 
     def _prepare_gene_sets(self, spatial_data, sc_data, num_HVG, user_provided_genes=None):
-        """
-        :meta private:
-        """
         print("Preparing gene sets for ENVI analysis...")
-        
         
         # Make copies to avoid modifying inputs
         spatial_obj = spatial_data.copy()
@@ -711,7 +720,7 @@ class ENVI:
             self.sc_data.obsm["COVET_SQRT"], self.sc_data.obsm["COVET_SQRT"]
         )
 
-    def infer_niche_celltype(self, cell_type_key="cell_type"):
+    def infer_niche_celltype(self):
         """
         Predict cell type abundence based one ENVI-inferred COVET representations
 
@@ -724,7 +733,7 @@ class ENVI:
             self.spatial_data,
             self.k_nearest,
             spatial_key=self.spatial_key,
-            cell_type_key=cell_type_key,
+            cell_type_key=self.cell_type_key,
             batch_key=self.batch_key,
         )
 
