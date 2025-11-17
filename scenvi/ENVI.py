@@ -32,6 +32,7 @@ class ENVI:
     :param sc_data: (anndata) complementary sinlge cell data
     :param spatial_key: (str) obsm key name with physical location of spots/cells (default 'spatial')
     :param batch_key: (str) obs key name of batch/sample of spatial data (default 'batch' if in spatial_data.obs, else -1)
+    :param niche_key: (str) obs key name of niche label (defult None)
     :param num_layers: (int) number of neural network for decoders and encoders (default 3)
     :param num_neurons: (int) number of neurons in each layer (default 1024)
     :param latent_dim: (int) size of ENVI latent dimention (size 512)
@@ -61,6 +62,7 @@ class ENVI:
         sc_data,
         spatial_key="spatial",
         batch_key="batch",
+        niche_key=None,
         num_layers=3,
         num_neurons=1024,
         latent_dim=512,
@@ -88,6 +90,7 @@ class ENVI:
 
         if batch_key not in spatial_data.obs.columns:
             batch_key = -1
+        self.niche_key = niche_key
 
         self.k_nearest = k_nearest
         self.spatial_key = spatial_key
@@ -120,7 +123,8 @@ class ENVI:
             batch_key=self.batch_key,
             batch_size=covet_batch_size,
             use_obsm=self.covet_use_obsm,
-            use_layer=self.covet_use_layer
+            use_layer=self.covet_use_layer,
+            niche_key=self.niche_key,
         )
 
         self.overlap_num = self.overlap_genes.shape[0]
