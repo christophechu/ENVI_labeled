@@ -301,7 +301,7 @@ def niche_cell_type(
 
 def compute_covet(
     spatial_data, k=8, g=64, genes=None, spatial_key="spatial", batch_key="batch", 
-    batch_size=None, use_obsm=None, use_layer=None
+    batch_size=None, use_obsm=None, use_layer=None, niche_key=None
 ):
     """
     Compute niche covariance matrices for spatial data, run with scenvi.compute_covet
@@ -315,6 +315,7 @@ def compute_covet(
     :param batch_size: (int) Number of cells/spots to process at once for large datasets (default None)
     :param use_obsm: (str) obsm key to use for COVET calculation instead of gene expression (e.g. 'X_pca', 'X_dc') (default None)
     :param use_layer: (str) layer to use for COVET calculation instead of log-transformed X (e.g. 'log', 'log1p') (default None)
+    :param niche_key: (str) obs key name of niche label to restrict neighbors to same niche (default None, i.e. no restriction)
         
     :return COVET: niche covariance matrices
     :return COVET_SQRT: matrix square-root of niche covariance matrices for approximate OT
